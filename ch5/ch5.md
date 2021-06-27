@@ -292,3 +292,220 @@ numGoroutine= 1
 numGoroutine= 1
 为什么会有两种结果呢？
 关闭done通道之后，select监听的两个通道就都不阻塞了，select会随机选择一个执行，所以会出现两个结果
+
+## 5.2 并发范式
+
+本节通过示例来演示GO的并发处理能力，每个示例代表一个范式，这些范式都有典型的特征，在真是程序中稍稍改造就可以使用。
+
+### 5.2.1 生成器
+
+在应用系统编程中，比较常见的时调用一个统一的全局的生成器服务，用于生成全局事务编号、订单号、序列号和随机数等。
+带缓冲的生成器，如下：
+
+```go
+package main
+
+import (
+ "fmt"
+ "math/rand"
+)
+
+func GenerateIntA() chan int {
+ ch := make(chan int, 10)
+ go func() {
+  for {
+   ch <- rand.Int()
+  }
+ }()
+
+ return ch
+}
+
+func main() {
+ ch := GenerateIntA()
+ fmt.Println(<-ch)
+ fmt.Println(<-ch)
+}
+
+```
+
+多个goroutine增强型生成器(使用扇入技术),如下：
+
+```go
+package main
+
+import (
+ "fmt"
+ "math/rand"
+)
+
+func GenerateIntA() chan int {
+ ch := make(chan int, 10)
+ go func() {
+  for {
+   ch <- rand.Int()
+  }
+ }()
+
+ return ch
+}
+
+func GenerateIntB() chan int {
+ ch := make(chan int, 10)
+ go func() {
+  for {
+   ch <- rand.Int()
+  }
+ }()
+
+ return ch
+}
+
+func GenerateInt() chan int {
+ ch := make(chan int, 20)
+ go func() {
+  for {
+   select {
+   case ch <- <-GenerateIntA():
+   case ch <- <-GenerateIntB():
+   }
+  }
+ }()
+
+ return ch
+}
+
+func main() {
+ ch := GenerateInt()
+ for i := 0; i < 100; i++ {
+  fmt.Println(<-ch)
+ }
+}
+
+```
+
+有时又希望生成器可以自动退出，可以借助GO通道的退出通知机制（close channel to broadcast），如下：
+
+```go
+package main
+
+import (
+ "fmt"
+ "math/rand"
+)
+
+func GenerateIntA(done chan struct{}) chan int {
+ ch := make(chan int)
+ go func() {
+ Lable:
+  for {
+   select {
+   case ch <- rand.Int():
+   case <-done:
+    break Lable
+   }
+  }
+  close(ch)
+ }()
+
+ return ch
+}
+
+func main() {
+ done := make(chan struct{})
+ ch := GenerateIntA(done)
+
+ fmt.Println(<-ch)
+ fmt.Println(<-ch)
+ close(ch)
+ for v := range ch {
+  fmt.Println(v)
+ }
+}
+
+```
+
+一个融合了并发、缓冲、退出通知等多重特性的生成器，如下：
+
+```go
+package main
+
+import (
+ "fmt"
+ "math/rand"
+)
+
+func GenerateIntA(done chan struct{}) chan int {
+ ch := make(chan int)
+ go func() {
+ Lable:
+  for {
+   select {
+   case ch <- rand.Int():
+   case <-done:
+    break Lable
+   }
+  }
+  close(ch)
+ }()
+
+ return ch
+}
+
+func GenerateIntB(done chan struct{}) chan int {
+ ch := make(chan int, 5)
+ go func() {
+ Lable:
+  for {
+   select {
+   case ch <- rand.Int():
+   case <-done:
+    break Lable
+   }
+  }
+  close(ch)
+ }()
+
+ return ch
+}
+
+func GenerateInt(done chan struct{}) chan int {
+ ch := make(chan int, 10)
+ send := make(chan struct{})
+ go func() {
+ Lable:
+  for {
+   select {
+   case ch <- <-GenerateIntA(send):
+   case ch <- <-GenerateIntB(send):
+   case <-done:
+    send <- struct{}{}
+    send <- struct{}{}
+    break Lable
+   }
+  }
+  close(ch)
+ }()
+ return ch
+}
+
+func main() {
+ done := make(chan struct{})
+ ch := GenerateInt(done)
+ for i := 0; i < 10; i++ {
+  fmt.Println(<-ch)
+ }
+ done <- struct{}{}
+ fmt.Println("stop generate")
+}
+
+```
+
+### 5.2.2 管道（pipeline）
+
+通道实际上可以分为两个方向，读和写，加入一个函数的输入参数和输出参数都是同一个类型的通道，则该函数可以调用自己，最终形成一个调用链。当然，多个具有相同参数类型的函数也能组成一个调用链，这很像UNIX环境的管道，是一个有类型的管道。
+展示GO的链式处理能力，如下：
+
+```go
+
+```
