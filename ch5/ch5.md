@@ -631,3 +631,207 @@ func main() {
 
 ```
 
+### 5.2.4 固定worker工作池
+
+GO语言中很容易构建固定数量的goroutines作为工作池线程。
+程序中除了主要的main goroutine，还有以下几类goroutine：
+（1）初始化任务的goroutine
+（2）分发任务的goroutine
+（3）等待所有worker结束，然后关闭结果通道的goroutine。
+main函数复杂拉起上述goroutine，并从结果通道中获取最后的结果。
+程序要采取三个通道：
+（1）传递任务task的通道
+（2）传递结果result的通道
+（3）传递任务结束后关闭所有通道信号的通道
+代码如下：
+
+```go
+package main
+
+import "fmt"
+
+//固定的workers数量
+const (
+ NUMBER = 10
+)
+
+type task struct {
+ begin  int
+ end    int
+ result chan int
+}
+
+//单个计算任务
+func (t *task) do() {
+ sum := 0
+ for i := t.begin; i <= t.end; i++ {
+  sum += i
+ }
+ t.result <- sum
+}
+
+func InitTask(taskChan chan<- task, r chan int, p int) {
+ qu := p / 10
+ mod := p % 10
+ high := qu * 10
+ for i := 0; i < qu; i++ {
+  tsk := task{
+   begin:  10*i + 1,
+   end:    10 * (i + 1),
+   result: r,
+  }
+  taskChan <- tsk
+ }
+ if mod != 0 {
+  tsk := task{
+   begin:  high + 1,
+   end:    p,
+   result: r,
+  }
+  taskChan <- tsk
+ }
+ close(taskChan)
+}
+
+//发布任务
+func DistributeTask(taskChan <-chan task, workers int, done chan struct{}) {
+ for i := 0; i < workers; i++ {
+  go ProcessTask(taskChan, done)
+ }
+}
+
+func ProcessTask(taskChan <-chan task, done chan struct{}) {
+ for t := range taskChan {
+  t.do()
+ }
+ done <- struct{}{}
+}
+
+func CloseResult(done chan struct{}, resultChan chan int, workers int) {
+ for i := 0; i < workers; i++ {
+  <-done
+ }
+ close(done)
+ close(resultChan)
+}
+
+func ProcessResult(result chan int) int {
+ sum := 0
+ for res := range result {
+  sum += res
+ }
+
+ return sum
+}
+
+func main() {
+ workers := NUMBER
+ taskChan := make(chan task, 10)
+ resultChan := make(chan int, 10)
+ done := make(chan struct{}, 10)
+
+ go InitTask(taskChan, resultChan, 100)
+ go DistributeTask(taskChan, workers, done)
+ go CloseResult(done, resultChan, workers)
+
+ sum := ProcessResult(resultChan)
+ fmt.Println(sum)
+}
+
+```
+
+### 5.2.5 future模式
+
+经常遇到在一个流程中需要调用多个子调用的情况，这些子调用之间没有依赖，如果串行的调用，则耗时会很长，可以使用future模式。
+基本工作原理：
+（1）使用chan作为函数参数
+（2）启动goroutine调用函数
+（3）通过chan传入参数
+（4）做其他可以并行处理的实情
+（5）通过chan异步获得结果
+代码如下：
+
+```go
+package main
+
+import (
+ "fmt"
+ "time"
+)
+
+type query struct {
+ sql    chan string
+ result chan string
+}
+
+func execQuery(q query) {
+ go func() {
+  sql := <-q.sql
+  q.result <- "result from " + sql
+ }()
+}
+
+func main() {
+ q := query{
+  make(chan string, 1),
+  make(chan string, 1),
+ }
+ go execQuery(q)
+ q.sql <- "select * from table"
+
+ time.Sleep(1 * time.Second)
+
+ fmt.Println(<-q.result)
+}
+
+```
+
+future模式的最大好处是将同步调用转换为异步调用，实际情况要比上面复杂的多，要考虑错误和异常的处理。
+
+## 5.3 context标准库
+
+GO语言中的goroutine没有父与子的关系,自然不会有所谓子进程退出后的通知机制,所有的goroutine都是平行的被调度，多个goroutine如何协作涉及通信，同步，通知和退出四个方面。
+**通信**：chan是通信基础，这里的通信指程序的数据通道
+**同步**：无缓冲的chan是一种同步机制，同样的sync.WaitGroup也是一种同步机制
+**通知**：这个通知和上面的通信不太一样，通信负责的是业务数据，而通知往往处理管理、控制流数据。一个简单实现，输入端绑定两个chan，一个处理业务，一个处理通知，用select收敛进行处理。这是一种简单的实现，而不是一种通用的解决办法。
+**退出**：借助一个单独的通道和select实现close channel to broadcast。
+GO语言在遇到复杂的并发结构处理起来就力不从心。实际编程中goroutine会拉起新的goroutine，新的再拉起新的，最终形成一个树状结构，由于goroutine中没有父子关系，这个树状结构只是在程序员脑中抽象出来的，程序的执行模型没有维护这么一个树状结构。如何通知树上所有的goroutine都退出呢?仅靠语法层面是很难实现的。GO推出了context标准库，提供两种功能：退出通知和元数据调用。
+
+### 5.3.1 context设计目的
+
+跟踪goroutine调用树，并在调用树中传递通知和元数据
+
+### 5.3.2 工作机制和基本数据结构
+
+整体工作机制：第一个创建Context的goroutine被称为root节点。root节点负责创建一个实现Context接口的具体对象，并将该对象作为参数传递到新拉起来的goroutine中，下游的goroutine可以继续封装该对象，再传递给更下游。Context对象在传递过程中最终形成一个树状的数据结构，这样位于root节点的Context对象就能遍历整个Context树，通知和消息就能通过root节点传递出去，实现了上游对下游的消息传递。
+
+Context接口
+
+```go
+type Context interface {
+    //是否实现超时控制，实现则ok返回true，deadline为超时时间
+    //否则ok返回false
+    Deadline() (deadline time.Time, ok bool)
+    //后面被调用的goroutine应该监听该方法返回的chan，以便及时释放资源
+    Done() <-chan struct{}
+    //done返回的chan收到通知以后，才可以访问Err()获取因什么原因被取消
+    Err() error
+    //可以访问上游goroutine给下游穿的的goroutine的值
+    Value(key interface{}) interface{}
+}
+```
+
+canceler接口
+canceler接口是一个拓展接口，规定了取消通知的Context具体类型需要实现的接口。context包中的具体类型`*cancelCtx`和`*timerCtx`都实现了该接口。示例如下：
+
+```go
+type canceler interface {
+    //创建cancel接口实例的goroutine调用cancel方法后通知后续创建的goroutine退出
+    cancel(removeFromParent bool, err error)
+    //Done方法返回的chan要后端的goroutine来监听， 并及时退出
+    Done() <-chan struct{}
+}
+```
+
+emptyContext结构
+这个结构实现了Context接口，但不具备任何功能，因为其所有的方法都是空实现。其存在目的是作为Context对象树的根（root节点）
