@@ -925,3 +925,58 @@ func (c *cancelCtx) cancel(removeFromParent bool, err, error) {
 }
 
 ```
+
+### 5.3.3 API函数
+
+- 两个构造Context对象树根节点对象的函数
+- 五个传入Context示例对象并返回对该实例包装好的Context示例的API函数（With函数）
+
+### 5.3.4 辅助函数
+
+主要讲With函数内部通用的一些函数
+
+### 5.3.5 Context的用法
+
+初识context：
+
+```go
+package main
+
+import (
+ "context"
+ "fmt"
+ "time"
+)
+
+func main() {
+ ctx, cancel := context.WithCancel(context.Background())
+ go func(ctx context.Context) {
+  for {
+   select {
+   case <-ctx.Done():
+    fmt.Println("任务结束")
+    return
+   default:
+    fmt.Println("监控中")
+    time.Sleep(2 * time.Second)
+   }
+  }
+ }(ctx)
+
+ time.Sleep(10 * time.Second)
+ fmt.Println("通知结束")
+ cancel()
+ time.Sleep(5 * time.Second)
+}
+
+```
+
+### 5.3.6 使用context传递数据的争议
+
+（1）context传递的数据不是业务数据，离开这些数据也可以正常工作
+（2）传递的都是interface{}类型的数据，编译器不能进行严格的类型校检
+（3）使用interface{}进行类型断言和接口查询可能会带来一定的性能开销
+（4）值在传递的过程中可能会被后续的服务覆盖，且不容易被发现
+（5）传递信息不简明，晦涩，不利于后续维护
+
+总结：context的核心功能还是退出通知，传递数据只是辅助功能
