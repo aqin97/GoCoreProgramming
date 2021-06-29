@@ -834,4 +834,94 @@ type canceler interface {
 ```
 
 emptyContext结构
-这个结构实现了Context接口，但不具备任何功能，因为其所有的方法都是空实现。其存在目的是作为Context对象树的根（root节点）
+这个结构实现了Context接口，但不具备任何功能，因为其所有的方法都是空实现。其存在目的是作为Context对象树的根（root节点）。context包的使用思路就是不停的调用context包提供的包装函数来创建具有特殊功能的Context实例，每个Context实例的创建都以上一个Context对象作为参数，最终形成一个树状结构。示例如下：
+
+```go
+type emptyCtx int
+
+func (*emptyCtx) Deadline() (deadline time.Time, ok bool) { return }
+
+func (*emptyCtx) Done() <-chan struct{} { return nil }
+
+func (*emptyCtx) Err() error { return nil }
+
+func (*emptyCtx) Value(key interface{}) interface{} { return nil}
+
+func (e *emptyCtx) String() string {
+    switch e {
+    case background:
+        return "context.background"
+    case todo:
+        return "context,TODO"
+    }
+}
+
+```
+
+在context包中定义了两个全局变量和两个封装函数，返回两个emptyCtx实例对象，实际使用时用这两个封装函数来构造Context的root节点。示例如下：
+
+```go
+var (
+    background = new(emptyCtx)
+    todo = new(emptyCtx)
+)
+
+func Background() Context {
+    return background
+}
+
+func TODO() Context {
+    return todo
+}
+
+```
+
+cancelCtx是一个实现了Context接口和cancler接口的具体类型，canceler具有退出通知方法。退出通知机制不仅能通知自己，也能逐层通知其children节点。示例如下：
+
+```go
+type cancelCtx struct {
+    Context
+    done chan struct{}
+    mu sync.Mutex
+    children map[canceler]bool
+    err error
+}
+
+func (c *cancelCtx) Done() <-chan struct{} {
+    return c.done
+}
+
+func (c *cancelCtx) Err() error {
+    c.mu.Lock()
+    defer c.mu.UnLock()
+    return c.err
+}
+
+func (c *cancelCtx) String() string {
+    return fmt.Sprintf("%v.WithCancel", c.Context)
+}
+
+func (c *cancelCtx) cancel(removeFromParent bool, err, error) {
+    if err == nil {
+        panic("context: internal error: missing cancel error")
+    }
+    c.mu.Lock()
+    if c.err != nil {
+        c.mu.UnLock()
+        return
+    }
+    c.err = err
+    close(c.done)
+
+    for child := range c.children {
+        chiid.cancel(false, err)
+    }
+    c.children = nil
+    c.mu.UnLock()
+
+    if removeFromParent {
+        removeChild(c.Context, c)
+    }
+}
+
+```
